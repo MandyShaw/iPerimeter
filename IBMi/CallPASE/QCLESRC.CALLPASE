@@ -1,0 +1,259 @@
+/* Name: CallPASE.c
+ * Mandy Shaw 18 Jan 2014
+ * Call an i5/OS PASE procedure from ILE (32 bit)
+ *
+ * This example uses the Qp2dlopen, Qp2dlsym, and Qp2CallPase2 ILE
+ * functions to call an i5/OS PASE function passing in parameters */
+
+#include <stdio.h>
+#include <stddef.h>
+#include <errno.h>
+
+/* Conversions between ASCII and EBCDIC */
+#include <qtqiconv.h>
+
+/* ILE-PASE interface */
+#include <qp2user.h>
+
+/* Use EBCDIC default job CCSID in Qp2dlopen and Qp2dlsym calls */
+#define JOB_CCSID 0
+/* Use PASE CCSID elsewhere */
+#define PASE_CCSID 819
+
+/* start i5/OS PASE in this process */
+void startPASE(void) {
+  /* start32 starts the 32 bit version of i5/OS PASE */
+  char *start32Path="/usr/lib/start32";
+  char *arg_list[2];
+
+  arg_list[0] = start32Path;
+  arg_list[1] = NULL;
+  Qp2RunPase(start32Path,
+             NULL,
+             NULL,
+             0,
+             PASE_CCSID,
+             (char**)&arg_list,
+             NULL);
+}
+
+/* open a shared library */
+QP2_ptr32_t openlib(char * libname) {
+  QP2_ptr32_t id;
+  int * paseErrno;
+
+  /* Qp2dlopen dynamically loads the specified library returning an
+   * id value that can be used in calls to Qp2dlsym and Qp2dlcose */
+  id = Qp2dlopen(libname,
+                 (QP2_RTLD_NOW |
+                  QP2_RTLD_MEMBER ),
+                 JOB_CCSID);
+  if (id == 0) {
+      printf("Qp2dlopen failed.  ILE errno=%i\n", errno);
+      if ((paseErrno=Qp2errnop()) != NULL)
+          printf("Qp2dlopen failed.  i5/OS PASE errno=%i\n", *paseErrno);
+      printf("Qp2dlopen failed.  Qp2dlerror = %s\n", Qp2dlerror());
+  }
+
+  return(id);
+}
+
+/* find an exported symbol */
+void * findsym(const QP2_ptr32_t id, const char * functionname) {
+  void * symbol;
+  int * paseErrno;
+
+  /* Qp2dlsym locates the function descriptor for the
+   * specified function */
+  symbol = Qp2dlsym(id, functionname, JOB_CCSID, NULL);
+  if (symbol == NULL) {
+      printf("Qp2dlsym failed.  ILE errno = %i\n", errno);
+      if ((paseErrno=Qp2errnop()) != NULL)
+          printf("Qp2dlsym failed.  i5/OS PASE errno=%i\n", *paseErrno);
+      printf("Qp2dlsym failed.  Qp2dlerror = %s\n", Qp2dlerror());
+  }
+  return(symbol);
+}
+
+/* call i5/OS PASE procedure */
+int callPASE(const void * functionsymbol,
+             const void * arglist,
+             const QP2_arg_type_t * signature,
+             const QP2_result_type_t result_type,
+             void * buf,
+             const short buflen) {
+  int * paseErrno;
+  int rc;
+
+  /* Call Qp2CallPase2 to run the function */
+  rc = Qp2CallPase2(functionsymbol,
+                    arglist,
+                    signature,
+                    result_type,
+                    buf,
+                    buflen);
+  if (rc != 0) {
+      printf("Qp2CallPase failed.  rc=%i, ILE errno=%i\n", rc, errno);
+      if ((paseErrno=Qp2errnop()) != NULL)
+          printf("Qp2CallPase failed.  i5/OS PASE errno=%i\n", *paseErrno);
+      printf("Qp2CallPase failed.  Qp2dlerror=%s\n", Qp2dlerror());
+  }
+
+  return rc;
+}
+
+/* MAINLINE */
+int main(int argc, char *argv[])
+{
+  /* Call TestFunction from library test.a in current IFS directory */
+
+  /* General variables for any function */
+  /* Identifier for the library opened by Qp2dlopen */
+  QP2_ptr32_t id;
+  /* PASE function symbol pointer */
+  void * paseFunction_ptr;
+  /* ILE-PASE interface function return code */
+  int rc;
+  /* Returned PASE error code */
+  int *paseErrno;
+  /* Conversion between EBCDIC (assumed 285) & ASCII for PASE (819) */
+  char ascii_in[32] =   "IBMCCSID008190000000";
+  char ebcdic_in[32] =  "IBMCCSID002850000000";
+  char ascii_out[32] =  "IBMCCSID00819";
+  char ebcdic_out[32] = "IBMCCSID00285";
+  iconv_t cd;
+  char *ibuf, *obuf;
+
+  /* Variables specifically for TestFunction, which looks like this:
+     int TestFunction(int inp1, char *inp2, int inp3, char *inp4,
+                      char *outp5, int *outp6) */
+  /* PASE signature: int, ptr, int, ptr, ptr, ptr, null terminator */
+  const QP2_arg_type_t TestFunctionSig[] = {QP2_ARG_WORD,
+                                            QP2_ARG_PTR32,
+                                            QP2_ARG_WORD,
+                                            QP2_ARG_PTR32,
+                                            QP2_ARG_PTR32,
+                                            QP2_ARG_PTR32,
+                                            QP2_ARG_END};
+  /* Argument list for the PASE call interface. Must match signature */
+  struct {
+      QP2_word_t inp1;
+      QP2_ptr32_t inp2;
+      QP2_word_t inp3;
+      QP2_ptr32_t inp4;
+      QP2_ptr32_t outp5;
+      QP2_ptr32_t outp6;
+  } TestFunctionArglist;
+  /* Buffer of storage shared between ILE and PASE.
+     Used to send any string input parameters.
+     The first entry is the function result of TestFunction */
+  /* Data must stick to 4 byte boundaries */
+  struct {
+      QP2_word_t result; // this is an int (4 bytes)
+      char inp2[256];
+      char inp4[256];
+  } TestFunctionBuffer;
+  /* Output parameter pointers - ILE view */
+  char *outp5ptr;
+  int *outp6ptr;
+  /* Output parameter pointers - PASE view as alloc'd by QP2malloc */
+  QP2_ptr64_t outp5paseptr;
+  QP2_ptr64_t outp6paseptr;
+  /* Variables for conversions */
+  unsigned int inp2len, inp2asciilen, inp2ebcdiclen;
+  char inp2ebcdic[256];
+  unsigned int inp4len, inp4asciilen, inp4ebcdiclen;
+  char inp4ebcdic[256];
+  unsigned int outp5len,outp5asciilen, outp5ebcdiclen;
+  char outp5ebcdic[256];
+
+  /* Initialise the inputs that are passed by value */
+  TestFunctionArglist.inp1 = 1234;
+  TestFunctionArglist.inp3 = 5678;
+
+  /* Initialise the inputs that are passed by reference */
+  /* All this assumes SBCS, i.e. conversion in and out lengths same */
+  /* Parameter 2 */
+  cd = iconv_open(ascii_out, ebcdic_in);
+  strcpy(inp2ebcdic,"Test input parameter p2");
+  inp2len = strlen(inp2ebcdic);
+  inp2ebcdiclen = inp2len;
+  inp2asciilen = inp2len;
+  ibuf = inp2ebcdic;
+  obuf = TestFunctionBuffer.inp2;
+  iconv(cd, &ibuf, &inp2ebcdiclen, &obuf, &inp2asciilen);
+  TestFunctionBuffer.inp2[inp2len] = 0;
+  iconv_close(cd);
+  /* Parameter 5 */
+  cd = iconv_open(ascii_out, ebcdic_in);
+  strcpy(inp4ebcdic,"Test input parameter with more p4");
+  inp4len = strlen(inp4ebcdic);
+  inp4ebcdiclen = inp4len;
+  inp4asciilen = inp4len;
+  ibuf = inp4ebcdic;
+  obuf = TestFunctionBuffer.inp4;
+  iconv(cd, &ibuf, &inp4ebcdiclen, &obuf, &inp4asciilen);
+  TestFunctionBuffer.inp4[inp4len] = 0;
+  iconv_close(cd);
+
+  /* start i5/OS PASE in this process */
+  startPASE();
+  /* open the PASE function library */
+  id = openlib("./test.a");
+
+  if (id !=0) {
+    /* Locate the symbol for "TestFunction" */
+    paseFunction_ptr = findsym(id, "TestFunction");
+
+    if (paseFunction_ptr != NULL) {
+      /* Prepare argument list entries for our string inputs */
+      TestFunctionArglist.inp2 =
+        (QP2_ptr32_t)((offsetof(TestFunctionBuffer, inp2))
+                      | QP2_ARG_PTR_TOSTACK);
+      TestFunctionArglist.inp4 =
+        (QP2_ptr32_t)((offsetof(TestFunctionBuffer, inp4))
+                      | QP2_ARG_PTR_TOSTACK);
+
+      /* Allocate PASE memory for the two output parameters */
+      /* QP2malloc returns 64 bit PASE pointers, we need 32 bit */
+      outp5ptr = Qp2malloc(256,
+                           &outp5paseptr);
+      TestFunctionArglist.outp5 = outp5paseptr;
+      outp6ptr = Qp2malloc(sizeof(int),
+                           &outp6paseptr);
+      TestFunctionArglist.outp6 = outp6paseptr;
+      /* Call the function in i5/OS PASE */
+      rc = callPASE(paseFunction_ptr,
+                    &TestFunctionArglist,
+                    TestFunctionSig,
+                    QP2_RESULT_WORD,
+                    &TestFunctionBuffer,
+                    sizeof(TestFunctionBuffer));
+      } /* paseFunction_ptr != NULL */
+    } /* id != 0 */
+  /* rc <> 0 was handled in callPASE function */
+
+  /* Convert output to EBCDIC as needed */
+  /* Again this assumes SBCS */
+  cd = iconv_open(ebcdic_out, ascii_in);
+  outp5len = strlen(outp5ptr);
+  outp5asciilen = outp5len;
+  outp5ebcdiclen = outp5len;
+  ibuf = outp5ptr;
+  obuf = outp5ebcdic;
+  iconv(cd, &ibuf, &outp5asciilen, &obuf, &outp5ebcdiclen);
+  outp5ebcdic[outp5len] = 0;
+  iconv_close(cd);
+
+  printf("Result is %d\n", TestFunctionBuffer.result);
+  printf("Output parameter 5 is %s\n",outp5ebcdic);
+  printf("Output parameter 6 is %d\n",outp6ptr[0]);
+
+  /* Close the Qp2dlopen instance, and then call Qp2EndPase
+   * to end i5/OS PASE in this job */
+  Qp2dlclose(id);
+  Qp2EndPase();
+
+  return 0;
+}
+
